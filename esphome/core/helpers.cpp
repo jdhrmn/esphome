@@ -3,7 +3,6 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
-#include "esphome/core/string_ref.h"
 
 #include <strings.h>
 #include <algorithm>
@@ -141,6 +140,14 @@ uint16_t crc16be(const uint8_t *data, uint16_t len, uint16_t crc, uint16_t poly,
   }
 #endif
   return refout ? (crc ^ 0xffff) : crc;
+}
+
+uint8_t lrc(const uint8_t *data, uint16_t len) {
+  uint8_t lrc = 0x00;
+  for (uint8_t i = 0; i < len; i++) {
+    lrc += data[i];
+  }
+  return (~lrc + 1);
 }
 
 uint32_t fnv1_hash(const char *str) {
