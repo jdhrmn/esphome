@@ -180,6 +180,14 @@ uint16_t crc16be(const uint8_t *data, uint16_t len, uint16_t crc, uint16_t poly,
   return refout ? (crc ^ 0xffff) : crc;
 }
 
+uint8_t lrc(const uint8_t *data, uint16_t len) {
+  uint8_t lrc = 0x00;
+  for (uint8_t i = 0; i < len; i++) {
+    lrc += data[i];
+  }
+  return (~lrc + 1);
+}
+
 uint32_t fnv1_hash(const std::string &str) {
   uint32_t hash = 2166136261UL;
   for (char c : str) {

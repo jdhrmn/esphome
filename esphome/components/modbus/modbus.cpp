@@ -18,7 +18,7 @@ void Modbus::loop() {
   while (this->available()) {
     uint8_t byte;
     this->read_byte(&byte);
-    if (this->parse_modbus_byte_(byte)) {
+    if (this->parse_rx_byte_(byte)) {
       this->last_modbus_byte_ = now;
     } else {
       size_t at = this->rx_buffer_.size();
@@ -26,15 +26,17 @@ void Modbus::loop() {
         ESP_LOGV(TAG, "Clearing buffer of %d bytes - parse failed", at);
         this->rx_buffer_.clear();
       }
+      this->rx_length_ascii_ = 0;
     }
   }
 
-  if (now - this->last_modbus_byte_ > 50) {
+  if (now - this->last_modbus_byte_ > this->rx_character_timeout) {
     size_t at = this->rx_buffer_.size();
     if (at > 0) {
       ESP_LOGV(TAG, "Clearing buffer of %d bytes - timeout", at);
       this->rx_buffer_.clear();
     }
+    this->rx_length_ascii_ = 0;
 
     // stop blocking new send commands after sent_wait_time_ ms after response received
     if (now - this->last_send_ > send_wait_time_) {
@@ -44,6 +46,49 @@ void Modbus::loop() {
       waiting_for_response = 0;
     }
   }
+}
+
+bool Modbus::parse_rx_byte_(uint8_t byte) {
+  switch (this->transmission_mode) {
+    case ModbusTransmissionMode::ASCII: {
+      size_t at = this->rx_length_ascii_;
+      this->rx_length_ascii_ += 1;
+      ESP_LOGVV(TAG, "Modbus ASCII received Char  %c (0X%x)", byte, byte);
+
+      // Byte 0: Start of Frame character
+      if (at == 0) {
+        if (byte == this->ascii_rx_start_of_frame_) {
+          return true;
+        } else {
+          ESP_LOGW(TAG, "Modbus ASCII received character '%c'(0X%x) is not Start-of-frame character '%c'(0X%x)", byte,
+                   byte, this->ascii_rx_start_of_frame_, this->ascii_rx_start_of_frame_);
+          return false;
+        }
+      }
+
+      if ((at % 2) != 0) {
+        this->rx_byte_ascii[0] = byte;
+        return true;  // Char count not even
+      } else {
+        this->rx_byte_ascii[1] = byte;
+      }
+
+      if ((this->rx_byte_ascii[0] == '\r') && (this->rx_byte_ascii[1] == '\n')) {
+        ESP_LOGVV(TAG, "Modbus ASCII received End-of-frame (CRLF)");
+        return false;
+      }
+
+      uint8_t converted_byte = static_cast<uint8_t>(strtol(this->rx_byte_ascii, nullptr, 16));
+      return this->parse_modbus_byte_(converted_byte);
+
+      break;
+    }
+    case ModbusTransmissionMode::RTU: {
+      return this->parse_modbus_byte_(byte);
+      break;
+    }
+  }
+  return false;
 }
 
 bool Modbus::parse_modbus_byte_(uint8_t byte) {
@@ -78,11 +123,22 @@ bool Modbus::parse_modbus_byte_(uint8_t byte) {
 
     data_len = at - 2;
     data_offset = 1;
+    uint16_t computed_checksum = 0;
+    uint16_t remote_checksum = 0;
+    switch (this->transmission_mode) {
+      case ModbusTransmissionMode::ASCII: {
+        computed_checksum = lrc(raw, data_offset + data_len);
+        remote_checksum = uint16_t(raw[data_offset + data_len]);
+        break;
+      }
+      case ModbusTransmissionMode::RTU: {
+        computed_checksum = crc16(raw, data_offset + data_len);
+        remote_checksum = uint16_t(raw[data_offset + data_len]) | (uint16_t(raw[data_offset + data_len + 1]) << 8);
+        break;
+      }
+    }
 
-    uint16_t computed_crc = crc16(raw, data_offset + data_len);
-    uint16_t remote_crc = uint16_t(raw[data_offset + data_len]) | (uint16_t(raw[data_offset + data_len + 1]) << 8);
-
-    if (computed_crc != remote_crc)
+    if (computed_checksum != remote_checksum)
       return true;
 
     ESP_LOGD(TAG, "Modbus user-defined function %02X found", function_code);
@@ -111,19 +167,38 @@ bool Modbus::parse_modbus_byte_(uint8_t byte) {
     if (at < data_offset + data_len)
       return true;
 
-    // Byte 3+data_len: CRC_LO (over all bytes)
-    if (at == data_offset + data_len)
-      return true;
+    switch (this->transmission_mode) {
+      case ModbusTransmissionMode::ASCII: {
+        // Byte data_offset+len: LRC (over all bytes)
+        uint16_t computed_lrc = lrc(raw, data_offset + data_len);
+        uint16_t remote_lrc = uint16_t(raw[data_offset + data_len]);
+        if (computed_lrc != remote_lrc) {
+          if (this->disable_crc_) {
+            ESP_LOGD(TAG, "Modbus ASCII LRC Check failed, but ignored! %02X!=%02X", computed_lrc, remote_lrc);
+          } else {
+            ESP_LOGW(TAG, "Modbus ASCII LRC Check failed! %02X!=%02X", computed_lrc, remote_lrc);
+            return false;
+          }
+        }
+        break;
+      }
+      case ModbusTransmissionMode::RTU: {
+        // Byte 3+data_len: CRC_LO (over all bytes)
+        if (at == data_offset + data_len)
+          return true;
 
-    // Byte data_offset+len+1: CRC_HI (over all bytes)
-    uint16_t computed_crc = crc16(raw, data_offset + data_len);
-    uint16_t remote_crc = uint16_t(raw[data_offset + data_len]) | (uint16_t(raw[data_offset + data_len + 1]) << 8);
-    if (computed_crc != remote_crc) {
-      if (this->disable_crc_) {
-        ESP_LOGD(TAG, "Modbus CRC Check failed, but ignored! %02X!=%02X", computed_crc, remote_crc);
-      } else {
-        ESP_LOGW(TAG, "Modbus CRC Check failed! %02X!=%02X", computed_crc, remote_crc);
-        return false;
+        // Byte data_offset+len+1: CRC_HI (over all bytes)
+        uint16_t computed_crc = crc16(raw, data_offset + data_len);
+        uint16_t remote_crc = uint16_t(raw[data_offset + data_len]) | (uint16_t(raw[data_offset + data_len + 1]) << 8);
+        if (computed_crc != remote_crc) {
+          if (this->disable_crc_) {
+            ESP_LOGD(TAG, "Modbus CRC Check failed, but ignored! %02X!=%02X", computed_crc, remote_crc);
+          } else {
+            ESP_LOGW(TAG, "Modbus CRC Check failed! %02X!=%02X", computed_crc, remote_crc);
+            return false;
+          }
+        }
+        break;
       }
     }
   }
@@ -161,11 +236,37 @@ bool Modbus::parse_modbus_byte_(uint8_t byte) {
   return true;
 }
 
+void Modbus::write_byte_as_ascii_(uint8_t byte) {
+  char hex_char[3];
+  sprintf(hex_char, "%02X", byte);
+  this->write_byte(hex_char[0]);
+  this->write_byte(hex_char[1]);
+}
+
+void Modbus::write_array_as_ascii_(const std::vector<uint8_t> &data) {
+  for (int i = 0; i < data.size(); i++) {
+    this->write_byte_as_ascii_(data[i]);
+  }
+}
+
 void Modbus::dump_config() {
   ESP_LOGCONFIG(TAG, "Modbus:");
   LOG_PIN("  Flow Control Pin: ", this->flow_control_pin_);
   ESP_LOGCONFIG(TAG, "  Send Wait Time: %d ms", this->send_wait_time_);
   ESP_LOGCONFIG(TAG, "  CRC Disabled: %s", YESNO(this->disable_crc_));
+  ESP_LOGCONFIG(TAG, "  RX Character Timeout: %d ms", this->rx_character_timeout);
+  switch (this->transmission_mode) {
+    case ModbusTransmissionMode::ASCII: {
+      ESP_LOGCONFIG(TAG, "  Transmission Mode: ASCII");
+      ESP_LOGCONFIG(TAG, "  ASCII RX Start-of-frame: %c", this->ascii_rx_start_of_frame_);
+      ESP_LOGCONFIG(TAG, "  ASCII TX Start-of-frame: %c", this->ascii_tx_start_of_frame_);
+      break;
+    }
+    case ModbusTransmissionMode::RTU: {
+      ESP_LOGCONFIG(TAG, "  Transmission Mode: RTU");
+      break;
+    }
+  }
 }
 float Modbus::get_setup_priority() const {
   // After UART bus
@@ -206,14 +307,30 @@ void Modbus::send(uint8_t address, uint8_t function_code, uint16_t start_address
     }
   }
 
-  auto crc = crc16(data.data(), data.size());
-  data.push_back(crc >> 0);
-  data.push_back(crc >> 8);
-
   if (this->flow_control_pin_ != nullptr)
     this->flow_control_pin_->digital_write(true);
 
-  this->write_array(data);
+  switch (this->transmission_mode) {
+    case ModbusTransmissionMode::ASCII: {
+      auto checksum = lrc(data.data(), data.size());
+      data.push_back(checksum);
+
+      this->write_byte(this->ascii_tx_start_of_frame_);
+      this->write_array_as_ascii_(data);
+      this->write_byte('\r');
+      this->write_byte('\n');
+      break;
+    }
+    case ModbusTransmissionMode::RTU: {
+      auto crc = crc16(data.data(), data.size());
+      data.push_back(crc >> 0);
+      data.push_back(crc >> 8);
+
+      this->write_array(data);
+      break;
+    }
+  }
+
   this->flush();
 
   if (this->flow_control_pin_ != nullptr)
@@ -233,10 +350,25 @@ void Modbus::send_raw(const std::vector<uint8_t> &payload) {
   if (this->flow_control_pin_ != nullptr)
     this->flow_control_pin_->digital_write(true);
 
-  auto crc = crc16(payload.data(), payload.size());
-  this->write_array(payload);
-  this->write_byte(crc & 0xFF);
-  this->write_byte((crc >> 8) & 0xFF);
+  switch (this->transmission_mode) {
+    case ModbusTransmissionMode::ASCII: {
+      auto checksum = lrc(payload.data(), payload.size());
+      this->write_byte(this->ascii_tx_start_of_frame_);
+      this->write_array_as_ascii_(payload);
+      this->write_byte_as_ascii_(checksum);
+      this->write_byte('\r');
+      this->write_byte('\n');
+      break;
+    }
+    case ModbusTransmissionMode::RTU: {
+      auto crc = crc16(payload.data(), payload.size());
+      this->write_array(payload);
+      this->write_byte(crc & 0xFF);
+      this->write_byte((crc >> 8) & 0xFF);
+      break;
+    }
+  }
+
   this->flush();
   if (this->flow_control_pin_ != nullptr)
     this->flow_control_pin_->digital_write(false);

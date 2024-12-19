@@ -172,6 +172,9 @@ uint16_t crc16(const uint8_t *data, uint16_t len, uint16_t crc = 0xffff, uint16_
 uint16_t crc16be(const uint8_t *data, uint16_t len, uint16_t crc = 0, uint16_t poly = 0x1021, bool refin = false,
                  bool refout = false);
 
+/// Calculate a LRC checksum \p data with size \p len.
+uint8_t lrc(const uint8_t *data, uint16_t len);
+
 /// Calculate a FNV-1 hash of \p str.
 uint32_t fnv1_hash(const std::string &str);
 

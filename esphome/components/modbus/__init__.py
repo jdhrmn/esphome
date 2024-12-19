@@ -1,18 +1,15 @@
 from __future__ import annotations
+
+import re
 from typing import Literal
 
-import esphome.codegen as cg
-import esphome.config_validation as cv
-import esphome.final_validate as fv
-from esphome.cpp_helpers import gpio_pin_expression
-from esphome.components import uart
-from esphome.const import (
-    CONF_FLOW_CONTROL_PIN,
-    CONF_ID,
-    CONF_ADDRESS,
-    CONF_DISABLE_CRC,
-)
 from esphome import pins
+import esphome.codegen as cg
+from esphome.components import uart
+import esphome.config_validation as cv
+from esphome.const import CONF_ADDRESS, CONF_DISABLE_CRC, CONF_FLOW_CONTROL_PIN, CONF_ID
+from esphome.cpp_helpers import gpio_pin_expression
+import esphome.final_validate as fv
 
 DEPENDENCIES = ["uart"]
 
@@ -24,12 +21,33 @@ MULTI_CONF = True
 CONF_ROLE = "role"
 CONF_MODBUS_ID = "modbus_id"
 CONF_SEND_WAIT_TIME = "send_wait_time"
+CONF_RX_CHARACTER_TIMEOUT = "rx_character_timeout"
+CONF_TRANSMISSION_MODE = "transmission_mode"
+CONF_ASCII_RX_START_OF_FRAME = "ascii_rx_start_of_frame"
+CONF_ASCII_TX_START_OF_FRAME = "ascii_tx_start_of_frame"
 
 ModbusRole = modbus_ns.enum("ModbusRole")
 MODBUS_ROLES = {
     "client": ModbusRole.CLIENT,
     "server": ModbusRole.SERVER,
 }
+
+ModbusTransmissionMode = modbus_ns.enum("ModbusTransmissionMode")
+MODBUS_TRANSMISSION_MODES = {
+    "rtu": ModbusTransmissionMode.RTU,
+    "ascii": ModbusTransmissionMode.ASCII,
+}
+
+
+def ascii_start_of_frame(value):
+    value = cv.string_strict(value)
+    match = re.match(r"^(?!.*[0-9a-fA-F])[\x20-\x7E]$", value)
+    if match is None:
+        raise cv.Invalid(
+            "Start-of-frame must be a single, printable ASCII charachter, except for 0-9,A-F"
+        )
+    return value
+
 
 CONFIG_SCHEMA = (
     cv.Schema(
@@ -41,6 +59,18 @@ CONFIG_SCHEMA = (
                 CONF_SEND_WAIT_TIME, default="250ms"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_DISABLE_CRC, default=False): cv.boolean,
+            cv.Optional(CONF_TRANSMISSION_MODE, default="rtu"): cv.enum(
+                MODBUS_TRANSMISSION_MODES
+            ),
+            cv.Optional(
+                CONF_RX_CHARACTER_TIMEOUT, default="50ms"
+            ): cv.positive_time_period_milliseconds,
+            cv.Optional(
+                CONF_ASCII_RX_START_OF_FRAME, default=":"
+            ): ascii_start_of_frame,
+            cv.Optional(
+                CONF_ASCII_TX_START_OF_FRAME, default=":"
+            ): ascii_start_of_frame,
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -62,6 +92,19 @@ async def to_code(config):
 
     cg.add(var.set_send_wait_time(config[CONF_SEND_WAIT_TIME]))
     cg.add(var.set_disable_crc(config[CONF_DISABLE_CRC]))
+    cg.add(var.set_transmission_mode(config[CONF_TRANSMISSION_MODE]))
+    if config.get(CONF_TRANSMISSION_MODE) == "ascii":
+        cg.add(
+            var.set_ascii_rx_start_of_frame(
+                cg.RawExpression(f"'{config[CONF_ASCII_RX_START_OF_FRAME]}'")
+            )
+        )
+        cg.add(
+            var.set_ascii_tx_start_of_frame(
+                cg.RawExpression(f"'{config[CONF_ASCII_TX_START_OF_FRAME]}'")
+            )
+        )
+    cg.add(var.set_rx_character_timeout(config[CONF_RX_CHARACTER_TIMEOUT]))
 
 
 def modbus_device_schema(default_address):
