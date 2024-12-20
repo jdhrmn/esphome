@@ -72,6 +72,7 @@ class Modbus : public uart::UARTDevice, public Component {
   uint32_t last_modbus_byte_{0};
   uint32_t last_send_{0};
   std::vector<ModbusDevice *> devices_;
+  uint8_t lrc(const uint8_t *data, uint16_t len);
 };
 
 class ModbusDevice {
