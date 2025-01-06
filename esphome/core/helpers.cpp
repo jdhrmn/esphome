@@ -3,6 +3,7 @@
 #include "esphome/core/defines.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
+#include "esphome/core/string_ref.h"
 
 #include <strings.h>
 #include <algorithm>
