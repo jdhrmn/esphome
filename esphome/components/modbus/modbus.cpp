@@ -57,17 +57,28 @@ bool Modbus::parse_rx_byte_(uint8_t byte) {
     case ModbusTransmissionMode::ASCII: {
       size_t at = this->rx_length_ascii_;
       this->rx_length_ascii_ += 1;
-      ESP_LOGVV(TAG, "Modbus ASCII received Char  %c (0X%x)", byte, byte);
 
-      // Byte 0: Start of Frame character
       if (at == 0) {
+        // Byte 0: Start of Frame character
         if (byte == this->ascii_rx_start_of_frame_) {
+          ESP_LOGVV(TAG, "Modbus ASCII received Start-of-frame character %c (0X%x)", byte, byte);
           return true;
         } else {
           ESP_LOGW(TAG, "Modbus ASCII received character '%c'(0X%x) is not Start-of-frame character '%c'(0X%x)", byte,
                    byte, this->ascii_rx_start_of_frame_, this->ascii_rx_start_of_frame_);
           return false;
         }
+      } else if (byte == this->ascii_rx_start_of_frame_) {
+        ESP_LOGW(TAG,
+                 "Modbus ASCII Incomplete message. Received new Start-of-frame character, discarding last message");
+        this->rx_length_ascii_ = 1;
+        this->rx_buffer_.clear();
+        return true;
+      } else if ((byte >= '0' && byte <= '9') || (byte >= 'A' && byte <= 'F') || byte == '\r' || byte == '\n') {
+        ESP_LOGVV(TAG, "Modbus ASCII received Character %c (0X%x)", byte, byte);
+      } else {
+        ESP_LOGW(TAG, "Modbus ASCII received invalid Character %c (0X%x)", byte, byte);
+        return false;
       }
 
       if ((at % 2) != 0) {
@@ -267,6 +278,7 @@ void Modbus::dump_config() {
     }
   }
 }
+
 float Modbus::get_setup_priority() const {
   // After UART bus
   return setup_priority::BUS - 1.0f;
