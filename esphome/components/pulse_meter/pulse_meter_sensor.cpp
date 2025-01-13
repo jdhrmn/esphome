@@ -51,7 +51,8 @@ void PulseMeterSensor::loop() {
 
   // If there is an unprocessed edge, and filter_us_ has passed since, count this edge early
   if (this->get_->last_rising_edge_us_ != this->get_->last_detected_edge_us_ &&
-      now - this->get_->last_rising_edge_us_ >= this->filter_us_) {
+      now - this->get_->last_rising_edge_us_ >= this->filter_us_ &&
+      this->pulse_state_.last_intr_ == this->get_->last_rising_edge_us_) {
     this->peeked_edge_ = true;
     this->get_->last_detected_edge_us_ = this->get_->last_rising_edge_us_;
     this->get_->count_++;
